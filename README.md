@@ -1,7 +1,7 @@
 # 🌍 WorldPulse AI  
 **Global Sentiment Intelligence Powered by Google Gemini**
 
-![Architecture Diagram](A_flowchart_in_a_digital_vector_graphic_illustrate.png)
+
 
 ---
 
