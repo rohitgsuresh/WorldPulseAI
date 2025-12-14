@@ -1,5 +1,5 @@
 // @ts-nocheck
-// WorldPulse front-end with intro overlay + progressive painting + clear/reset + highlight
+// WorldPulse front-end with intro overlay + progressive painting + clear/reset + highlight + FIBO visual
 
 (function () {
   // ====== CONFIG ======
@@ -21,6 +21,10 @@
   const USE_PROGRESSIVE = true;         // paint as results arrive
   const MAX_PROGRESSIVE = 100;          // ask backend for up to 100 countries
   const PROG_CONCURRENCY = 8;           // simultaneous per-country calls
+
+  // FIBO visual toggle
+  const FIBO_ENABLED = true;
+  let fiboRequestId = 0;
 
   // ====== UTIL ======
   const log = (...a) => console.log("[WorldPulse]", ...a);
@@ -122,6 +126,12 @@
   const elIntro = $("#introOverlay");
   const elEnter = $("#enterBtn");
   const elSkipIntro = $("#skipIntro");
+
+  // FIBO DOM
+  const elFiboPanel = $("#fiboPanel");
+  const elFiboImage = $("#fiboImage");
+  const elFiboStatus = $("#fiboStatus");
+  const elFiboCaption = $("#fiboCaption");
 
   // ====== DATA LOADERS ======
   async function loadWorldFeatures() {
@@ -298,6 +308,62 @@
     return true;
   }
 
+  // ====== FIBO PANEL HELPERS ======
+  function resetFiboPanel() {
+    if (!elFiboPanel) return;
+    elFiboPanel.classList.add("hidden");
+    if (elFiboImage) {
+      elFiboImage.src = "";
+      elFiboImage.style.display = "none";
+    }
+    if (elFiboStatus) elFiboStatus.textContent = "";
+    if (elFiboCaption) elFiboCaption.textContent = "";
+  }
+
+  async function fetchFiboImage(countryKey, topic) {
+    if (!elFiboPanel || !FIBO_ENABLED) return;
+
+    const thisReq = ++fiboRequestId;
+
+    elFiboPanel.classList.remove("hidden");
+    if (elFiboStatus) elFiboStatus.textContent = "Generating visual…";
+    if (elFiboImage) elFiboImage.style.display = "none";
+    if (elFiboCaption) elFiboCaption.textContent = "";
+
+    try {
+      const url = `${BACKEND_URL}/fibo_image?country=${encodeURIComponent(countryKey)}&topic=${encodeURIComponent(topic || "")}`;
+      const res = await fetchWithRetries(url, { mode: "cors" }, 1, 800);
+      const data = await res.json();
+
+      if (thisReq !== fiboRequestId) return; // outdated response
+
+      if (data && data.image_url) {
+        const base = BACKEND_URL.replace(/\/+$/, "");
+        const fullUrl = data.image_url.startsWith("http")
+          ? data.image_url
+          : `${base}${data.image_url}`;
+
+        if (elFiboImage) {
+          elFiboImage.src = fullUrl;
+          elFiboImage.style.display = "block";
+        }
+        if (elFiboStatus) elFiboStatus.textContent = "";
+        if (elFiboCaption) {
+          const topicLabel = (data.topic || topic || "").trim();
+          elFiboCaption.textContent = topicLabel
+            ? `AI visual for “${topicLabel}” in ${data.country}.`
+            : `National flag of ${data.country}.`;
+        }
+      } else if (elFiboStatus) {
+        elFiboStatus.textContent = data?.note || "No visual available.";
+      }
+    } catch (e) {
+      if (thisReq !== fiboRequestId) return;
+      console.error("[WorldPulse] FIBO image error:", e);
+      if (elFiboStatus) elFiboStatus.textContent = "Failed to generate visual.";
+    }
+  }
+
   // ====== RENDER (sidebar) ======
   function handleCountryClick(f) {
     const mapName = f?.properties?.name || "";
@@ -307,17 +373,24 @@
     setHighlight(f, 1800);
 
     if (!info) {
-      elCountry.textContent = mapName || "-- NO COUNTRY SELECTED --";
-      elScore.textContent = "";
-      elSummary.textContent = "No data for this country on the current topic.";
-      elKeywords.innerHTML = "";
+      if (elCountry) elCountry.textContent = mapName || "-- NO COUNTRY SELECTED --";
+      if (elScore) elScore.textContent = "";
+      if (elSummary) elSummary.textContent = "No data for this country on the current topic.";
+      if (elKeywords) elKeywords.innerHTML = "";
+      resetFiboPanel();
       return;
     }
 
-    elCountry.textContent = mapName;
-    elScore.textContent = `Score: ${Number(info.sentiment_score).toFixed(2)}`;
-    elSummary.textContent = info.summary || "—";
-    elKeywords.innerHTML = (info.keywords || []).map(k => `<span class="chip">${k}</span>`).join("");
+    if (elCountry) elCountry.textContent = mapName;
+    if (elScore) elScore.textContent = `Score: ${Number(info.sentiment_score).toFixed(2)}`;
+    if (elSummary) elSummary.textContent = info.summary || "—";
+    if (elKeywords) {
+      elKeywords.innerHTML = (info.keywords || []).map(k => `<span class="chip">${k}</span>`).join("");
+    }
+
+    // Trigger FIBO visual snapshot
+    const topic = (elTopic?.value || "").trim();
+    fetchFiboImage(apiKey, topic);
   }
 
   // ====== HISTORY + BOOKMARKS ======
@@ -385,6 +458,7 @@
     if (elSummary) elSummary.textContent = "Click a country on the globe to inspect its mood on this topic.";
     if (elKeywords) elKeywords.innerHTML = "";
 
+    resetFiboPanel();
     repaintGlobe();
   }
 
@@ -419,9 +493,11 @@
                 // if the highlighted country just got data, refresh sidebar if it matches the label
                 const currentName = elCountry?.textContent?.trim();
                 if (currentName && normName(currentName) === data.country) {
-                  elScore.textContent = `Score: ${Number(data.sentiment_score).toFixed(2)}`;
-                  elSummary.textContent = data.summary || "—";
-                  elKeywords.innerHTML = (data.keywords || []).map(k => `<span class="chip">${k}</span>`).join("");
+                  if (elScore) elScore.textContent = `Score: ${Number(data.sentiment_score).toFixed(2)}`;
+                  if (elSummary) elSummary.textContent = data.summary || "—";
+                  if (elKeywords) {
+                    elKeywords.innerHTML = (data.keywords || []).map(k => `<span class="chip">${k}</span>`).join("");
+                  }
                 }
               }
               results.push(data);
@@ -475,6 +551,7 @@
     if (elScore) elScore.textContent = "";
     if (elSummary) elSummary.textContent = "Fetching AI sentiment per country…";
     if (elKeywords) elKeywords.innerHTML = "";
+    resetFiboPanel();
 
     try {
       const res = USE_PROGRESSIVE ? await runAnalysisProgressive(topic) : await runAnalysisBatch(topic);
@@ -494,6 +571,7 @@
       if (elScore) elScore.textContent = "";
       if (elSummary) elSummary.textContent = `CRITICAL ERROR: Failed to fetch AI data. (Message: ${err.message || err})`;
       if (elKeywords) elKeywords.innerHTML = "";
+      resetFiboPanel();
     } finally {
       busy = false;
       if (elAnalyze) {
@@ -548,6 +626,7 @@
     if (elScore) elScore.textContent = "";
     if (elSummary) elSummary.textContent = "Click Analyze to load a topic, then click a country to inspect it.";
     if (elKeywords) elKeywords.innerHTML = "";
+    resetFiboPanel();
 
     if (!countryFeatures.length) {
       await loadWorldFeatures().catch(e => {
