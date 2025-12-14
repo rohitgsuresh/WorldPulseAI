@@ -1,7 +1,8 @@
 # main.py
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import requests, json, time, asyncio
+from fastapi.staticfiles import StaticFiles
+import requests, json, time, asyncio, os, uuid, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
@@ -15,6 +16,15 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+# ---------- Static files (for FIBO images) ----------
+BASE_DIR = os.path.dirname(__file__)
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+FIBO_OUTPUT_SUBDIR = "fibo"
+FIBO_OUTPUT_DIR = os.path.join(STATIC_DIR, FIBO_OUTPUT_SUBDIR)
+os.makedirs(FIBO_OUTPUT_DIR, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # ---------- Vertex AI (Gemini) config ----------
 PROJECT_ID = "worldpulseofficial"
@@ -243,8 +253,7 @@ async def call_country(topic: str, result_name: str, search_name: str) -> dict:
 
     payload = {
         "contents": [{"role": "user", "parts": [{"text": user_query}]}],
-        # ✅ fixed extra bracket here
-        "system_instruction": {"role": "system", "parts": [{"text": SYSTEM_INSTRUCTION}]} ,
+        "system_instruction": {"role": "system", "parts": [{"text": SYSTEM_INSTRUCTION}]},
         "generation_config": {
             "response_mime_type": "application/json",
             "response_schema": RESPONSE_SCHEMA,
@@ -276,6 +285,84 @@ async def call_country(topic: str, result_name: str, search_name: str) -> dict:
             "summary": f"System error: Could not process AI request. (Details: {str(e)})",
             "keywords": ["API_FAILURE", "NO_DATA", "SYSTEM_ERROR"],
         }
+
+# ---------- FIBO (Bria) integration ----------
+# Toggle with env var if needed
+FIBO_ENABLED = os.getenv("FIBO_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# Where your FIBO repo lives relative to this file (adjust if needed)
+FIBO_REPO_DIR = os.getenv(
+    "FIBO_REPO_DIR",
+    os.path.abspath(os.path.join(BASE_DIR, "..", "FIBO")),
+)
+
+# Python + script names (can override via env)
+FIBO_PYTHON = os.getenv("FIBO_PYTHON", sys.executable)
+FIBO_SCRIPT = os.getenv("FIBO_SCRIPT", "generate.py")
+
+
+def run_fibo_image(country_short: str, country_long: str, topic: Optional[str]) -> Optional[str]:
+    """
+    Call the local FIBO generate.py script to render an image.
+    Returns relative URL path like /static/fibo/<file>.png on success, or None on failure.
+    """
+    if not FIBO_ENABLED:
+        print("FIBO is disabled via FIBO_ENABLED env")
+        return None
+
+    topic = (topic or "").strip()
+    if topic:
+        prompt = (
+            f"A clean, cinematic illustration representing '{topic}' in {country_long}. "
+            f"Professional, infographic-style, no text, global data-visualization aesthetic."
+        )
+    else:
+        prompt = (
+            f"A high-quality illustration of the national flag of {country_long}, "
+            f"centered on a dark background, no text, crisp and modern."
+        )
+
+    filename = f"{country_short.lower().replace(' ', '_')}_{uuid.uuid4().hex[:8]}.png"
+    output_path = os.path.join(FIBO_OUTPUT_DIR, filename)
+
+    cmd = [
+        FIBO_PYTHON,
+        FIBO_SCRIPT,
+        "--prompt", prompt,
+        "--seed", "1",
+        "--output", output_path,
+        "--model-mode", "local",   # force local VLM so we don't depend on GOOGLE_API_KEY
+    ]
+
+    print(f"[FIBO] cwd={FIBO_REPO_DIR}")
+    print(f"[FIBO] cmd={' '.join(cmd)}")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=FIBO_REPO_DIR,
+            capture_output=True,
+            text=True,
+        )
+        print("[FIBO] returncode:", proc.returncode)
+        if proc.stdout:
+            print("[FIBO] stdout:", proc.stdout)
+        if proc.stderr:
+            print("[FIBO] stderr:", proc.stderr)
+
+        if proc.returncode != 0:
+            return None
+
+    except Exception as e:
+        print(f"[FIBO] generation failed for {country_short}: {e}")
+        return None
+
+    # ensure file actually exists
+    if not os.path.exists(output_path):
+        print(f"[FIBO] expected output not found at {output_path}")
+        return None
+
+    return f"/static/{FIBO_OUTPUT_SUBDIR}/{filename}"
 
 # ---------- Endpoints ----------
 @app.get("/healthz")
@@ -310,8 +397,7 @@ def get_sentiment_country(
 
     payload = {
         "contents": [{"role": "user", "parts": [{"text": user_query}]}],
-        # ✅ fixed extra bracket here
-        "system_instruction": {"role": "system", "parts": [{"text": SYSTEM_INSTRUCTION}]} ,
+        "system_instruction": {"role": "system", "parts": [{"text": SYSTEM_INSTRUCTION}]},
         "generation_config": {"response_mime_type": "application/json", "response_schema": RESPONSE_SCHEMA},
     }
 
@@ -371,3 +457,46 @@ async def get_sentiment(
     results = await asyncio.gather(*tasks, return_exceptions=False)
 
     return {"topic": topic, "results": results}
+
+@app.get("/fibo_image")
+def get_fibo_image(
+    country: str = Query(..., min_length=2),
+    topic: Optional[str] = Query("", description="Optional topic to steer the visual")
+):
+    """
+    Generate (or attempt to generate) a FIBO image for the given country + topic.
+
+    Returns:
+    - country: short key (e.g. "USA")
+    - topic: topic string (may be empty)
+    - image_url: relative URL to the generated image, if successful
+    - note: textual status
+    """
+    if country not in COUNTRY_MAPPING:
+        raise HTTPException(status_code=400, detail=f"Unsupported country: {country}")
+
+    if not FIBO_ENABLED:
+        return {
+            "country": country,
+            "topic": topic or "",
+            "image_url": None,
+            "note": "FIBO image generation is disabled on this deployment.",
+        }
+
+    country_long = COUNTRY_MAPPING[country]
+    img_rel_url = run_fibo_image(country, country_long, topic)
+
+    if not img_rel_url:
+        return {
+            "country": country,
+            "topic": topic or "",
+            "image_url": None,
+            "note": "FIBO failed to generate an image.",
+        }
+
+    return {
+        "country": country,
+        "topic": topic or "",
+        "image_url": img_rel_url,
+        "note": "ok",
+    }
