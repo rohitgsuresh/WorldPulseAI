@@ -1,29 +1,22 @@
-#Use official Python 3.11 slim image
+# Dockerfile — WorldPulse
+# Serves FastAPI backend + static frontend (index.html, app.js) in one container
+# Deploy on Render: Language=Docker, add GEMINI_API_KEY env var
 
 FROM python:3.11-slim
 
 WORKDIR /app
 
-#Copy only requirements first for caching
-
+# Install dependencies first (cached layer)
 COPY requirements.txt .
-
-#Install dependencies
-
 RUN pip install --no-cache-dir -r requirements.txt
 
-#Copy the rest of the backend code
-
+# Copy all app files
 COPY . .
 
-#Cloud Run uses $PORT
+# Create static/fibo dir (FIBO images go here at runtime)
+RUN mkdir -p static/fibo
 
-ENV PORT 8080
+# Render uses port 10000 by default for Docker services
+EXPOSE 10000
 
-#Run FastAPI with Gunicorn and Uvicorn workers for production stability and concurrency.
-
-CMD exec gunicorn main:app \
-    --bind 0.0.0.0:${PORT} \
-    --workers ${WEB_CONCURRENCY:-1} \
-    --worker-class uvicorn.workers.UvicornWorker \
-    --timeout 180 --graceful-timeout 30 --keep-alive 120 --log-level info
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
