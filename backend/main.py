@@ -39,8 +39,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # gemini-2.0-flash is the sweet spot: fast, capable, generous free limits
 MODEL_CANDIDATES = [
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",  # smallest/fastest fallback
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash-8b-latest",
 ]
 
 AI_STUDIO_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
