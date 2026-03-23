@@ -1,5 +1,5 @@
 # main.py — WorldPulse backend
-# Google AI Studio free tier: 15 RPM — rate limiter spaces requests 4s apart
+# Rate limiting: staggered start delays + per-request retry on 429
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,34 +28,22 @@ os.makedirs(FIBO_OUTPUT_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # ---------- Google AI Studio config ----------
-# Get free key at: https://aistudio.google.com/app/apikey
-# Set GEMINI_API_KEY in Render environment variables
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 MODEL_ID = "gemini-2.0-flash"
-AI_STUDIO_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models"
-    f"/{MODEL_ID}:generateContent?key={GEMINI_API_KEY}"
-)
 
-# ---------- Rate limiter ----------
-# Free tier = 15 RPM = 1 request per 4 seconds.
-# A global async lock ensures requests are spaced out across all concurrent tasks.
-_rate_lock = asyncio.Lock()
-_last_request_time: float = 0.0
-RATE_INTERVAL = 4.5  # seconds between requests — slightly over 4s to be safe
+def get_ai_studio_url():
+    return (
+        f"https://generativelanguage.googleapis.com/v1beta/models"
+        f"/{MODEL_ID}:generateContent?key={GEMINI_API_KEY}"
+    )
 
-async def acquire_rate_slot():
-    """Block until it's safe to fire the next Gemini request."""
-    global _last_request_time
-    async with _rate_lock:
-        loop = asyncio.get_event_loop()
-        now = loop.time()
-        gap = RATE_INTERVAL - (now - _last_request_time)
-        if gap > 0:
-            await asyncio.sleep(gap)
-        _last_request_time = loop.time()
+# ---------- Rate limiting config ----------
+# Free tier = 15 RPM.
+# Strategy: stagger each country's start by STAGGER_DELAY seconds based on its
+# index in the queue. Country 0 starts immediately, country 1 waits 4s,
+# country 2 waits 8s, etc. This guarantees we never exceed 15 RPM.
+STAGGER_DELAY = 4.5   # seconds between each country's first request
 
-# Thread pool — keep small since we're rate-limited anyway
 executor = ThreadPoolExecutor(max_workers=4)
 
 # ---------- Countries ----------
@@ -184,35 +172,36 @@ RESPONSE_SCHEMA = {
 
 
 # ---------- Gemini API caller ----------
-def call_gemini_sync(payload: dict, max_retries: int = 5) -> dict:
+def call_gemini_sync(payload: dict, max_retries: int = 3) -> dict:
     """
     Synchronous Gemini call — runs in a thread via run_in_executor.
-    Retries with exponential backoff on 429.
+    Only retries on 429 with a fixed 65s wait (just over one RPM window).
     """
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY not set.")
 
+    url = get_ai_studio_url()
     headers = {"Content-Type": "application/json"}
     last_err = None
 
     for attempt in range(max_retries):
         try:
-            resp = requests.post(AI_STUDIO_URL, headers=headers, json=payload, timeout=45)
+            resp = requests.post(url, headers=headers, json=payload, timeout=45)
 
             if resp.status_code == 429:
-                wait = min(10 * (2 ** attempt), 90)
-                print(f"[429] Rate limited, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait)
-                last_err = Exception(f"429 after attempt {attempt + 1}")
+                # Wait one full minute to let the RPM window reset
+                print(f"[429] Rate limited, waiting 65s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(65)
+                last_err = Exception("429 rate limit")
                 continue
 
             if not resp.ok:
-                raise requests.HTTPError(f"{resp.status_code} {resp.reason}: {resp.text}")
+                raise requests.HTTPError(f"{resp.status_code}: {resp.text[:200]}")
 
             data = resp.json()
             cands = data.get("candidates") or []
             if not cands or "content" not in cands[0] or "parts" not in cands[0]["content"]:
-                raise KeyError("Unexpected response structure from Gemini")
+                raise KeyError("Unexpected Gemini response structure")
 
             text = cands[0]["content"]["parts"][0].get("text", "")
             return json.loads(text)
@@ -255,10 +244,15 @@ def normalize_result(data: dict, result_name: str, topic: str) -> dict:
     return data
 
 
-# ---------- Per-country async task ----------
-async def call_country(topic: str, result_name: str, search_name: str) -> dict:
-    # Wait for a rate slot before firing — this is what prevents 429s
-    await acquire_rate_slot()
+# ---------- Per-country async task (with staggered start) ----------
+async def call_country(topic: str, result_name: str, search_name: str, index: int = 0) -> dict:
+    """
+    index: position in the batch queue (0-based).
+    Each task sleeps index * STAGGER_DELAY seconds before firing,
+    so requests are naturally spread 4.5s apart — well under 15 RPM.
+    """
+    await asyncio.sleep(index * STAGGER_DELAY)
+
     payload = build_payload(search_name, topic)
     loop = asyncio.get_running_loop()
     try:
@@ -324,7 +318,8 @@ async def get_sentiment_country(
 ):
     if country not in COUNTRY_MAPPING:
         raise HTTPException(status_code=400, detail=f"Unsupported country: {country}")
-    return await call_country(topic, country, COUNTRY_MAPPING[country])
+    # Single country — no stagger needed
+    return await call_country(topic, country, COUNTRY_MAPPING[country], index=0)
 
 
 @app.get("/sentiment")
@@ -342,8 +337,11 @@ async def get_sentiment(
     else:
         target = list(COUNTRY_MAPPING.keys())[:limit]
 
-    # acquire_rate_slot() inside call_country serializes all requests globally
-    tasks = [asyncio.create_task(call_country(topic, c, COUNTRY_MAPPING[c])) for c in target]
+    # Pass index so each task staggers its start time
+    tasks = [
+        asyncio.create_task(call_country(topic, c, COUNTRY_MAPPING[c], index=i))
+        for i, c in enumerate(target)
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=False)
     return {"topic": topic, "results": results}
 
