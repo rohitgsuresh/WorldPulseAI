@@ -218,7 +218,7 @@ def call_gemini_api(payload: dict, max_retries: int = 2) -> dict:
                     # 429 = rate limit — back off and try next model
                     if resp.status_code == 429:
                         print(f"Rate limited on '{model_id}', backing off...")
-                        time.sleep(3)
+                        time.sleep(10)
                         raise requests.HTTPError(f"429 rate limit on {model_id}")
                     raise requests.HTTPError(f"{resp.status_code} {resp.reason}. Body: {body}")
 
@@ -383,7 +383,7 @@ async def get_sentiment(
         target = list(COUNTRY_MAPPING.keys())[:limit]
 
     # AI Studio free tier: 15 RPM — keep concurrency conservative
-    SEM = asyncio.Semaphore(8)
+    SEM = asyncio.Semaphore(3)
 
     async def _job(c_short: str):
         async with SEM:
