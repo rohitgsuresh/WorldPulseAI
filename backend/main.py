@@ -5,6 +5,7 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import requests, json, time, asyncio, os, uuid, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
@@ -413,3 +414,23 @@ def get_fibo_image(
                 "note": "FIBO failed to generate an image."}
 
     return {"country": country, "topic": topic or "", "image_url": img_rel_url, "note": "ok"}
+
+
+# ---------- Frontend serving ----------
+# Must be defined AFTER all API routes so the catch-all doesn't swallow them.
+
+@app.get("/")
+def serve_index():
+    return FileResponse(os.path.join(BASE_DIR, "index.html"))
+
+@app.get("/app.js")
+def serve_js():
+    return FileResponse(os.path.join(BASE_DIR, "app.js"))
+
+@app.get("/{full_path:path}")
+def serve_fallback(full_path: str):
+    """Serve any other static file that exists, otherwise return index.html."""
+    file_path = os.path.join(BASE_DIR, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    return FileResponse(os.path.join(BASE_DIR, "index.html"))
