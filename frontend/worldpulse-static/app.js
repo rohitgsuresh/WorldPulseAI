@@ -7,7 +7,7 @@
 
 (function () {
   // ====== CONFIG ======
-  const BACKEND_URL = "https://worldpulse-api-1014603752331.asia-southeast1.run.app";
+  const BACKEND_URL = "";
 
   const WORLD_GEOJSON_SOURCES = [
     "https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson",
