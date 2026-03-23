@@ -702,62 +702,30 @@
     repaintGlobe();
   }
 
-  // ====== PROGRESSIVE ANALYSIS ======
+  // ====== BATCH ANALYSIS ======
   async function runAnalysisProgressive(topic) {
     clearState();
     currentTopic = topic;
 
-    let shortKeys = await fetchCountriesList();
-    if (!shortKeys.length) {
-      shortKeys = [...new Set(countryFeatures.map(f => normName(f.properties.name)))].slice(0, MAX_PROGRESSIVE);
-    }
+    // Single call to /sentiment — backend handles chunking into 4 batches of 25
+    const url = `${BACKEND_URL}/sentiment?topic=${encodeURIComponent(topic)}&limit=100`;
+    const resp = await fetchWithRetries(url, { mode: "cors" }, 2, 1000);
+    const data = await resp.json();
+    const results = data.results || [];
 
-    let running = 0, i = 0;
-    const queue = [...shortKeys];
-    let completed = 0;
-
-    return new Promise((resolve) => {
-      const results = [];
-      const maybeKick = () => {
-        while (running < PROG_CONCURRENCY && i < queue.length) {
-          const c = queue[i++]; running++;
-          fetchSentimentCountry(topic, c)
-            .then(data => {
-              if (data && data.country) {
-                resultByApiKey[data.country] = data;
-                repaintGlobe();
-                buildPulseRings();      // update rings as each result lands
-                pushTicker(data);       // stream to ticker
-
-                // update sidebar if this is the selected country
-                const currentName = elCountry?.textContent?.trim();
-                if (currentName && normName(currentName) === data.country) {
-                  if (elScore) {
-                    elScore.textContent = `Score: ${Number(data.sentiment_score).toFixed(2)}`;
-                    elScore.style.color = scoreToColor(data.sentiment_score);
-                  }
-                  if (elSummary) elSummary.textContent = data.summary || "—";
-                  if (elKeywords) elKeywords.innerHTML = (data.keywords || []).map(k => `<span class="chip">${k}</span>`).join("");
-                }
-              }
-              results.push(data);
-            })
-            .catch(e => console.error("country failed", c, e))
-            .finally(() => {
-              running--;
-              completed++;
-              if (completed >= shortKeys.length || (running === 0 && i >= queue.length)) {
-                // All done: build final arcs
-                buildCorrelationArcs();
-                resolve({ topic, results });
-              } else {
-                maybeKick();
-              }
-            });
-        }
-      };
-      maybeKick();
+    // Paint all results at once
+    results.forEach(r => {
+      if (r && r.country) {
+        resultByApiKey[r.country] = r;
+        pushTicker(r);
+      }
     });
+
+    repaintGlobe();
+    buildPulseRings();
+    buildCorrelationArcs();
+
+    return { topic, results };
   }
 
   // ====== ORCHESTRATION ======
